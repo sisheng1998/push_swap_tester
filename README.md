@@ -10,14 +10,14 @@ Clone the tester inside your push_swap repository:
 
 ```sh
 cd push_swap
-git clone https://github.com/sisheng1998/push_swap_tester.git push_swap_tester
+git clone https://github.com/sisheng1998/push_swap_tester.git
 cd push_swap_tester
 ```
 
 ## Usage
 
 | Command  | Runs                         |
-|----------|------------------------------|
+| -------- | ---------------------------- |
 | `make a` | mandatory + bonus            |
 | `make m` | mandatory only (`push_swap`) |
 | `make b` | bonus only (`checker`)       |
@@ -26,19 +26,20 @@ cd push_swap_tester
 
 Append to any target:
 
-| Variable   | Default | Meaning                                         |
-|------------|---------|-------------------------------------------------|
-| `PS_DIR`   | `..`    | push_swap directory                             |
-| `RUNS_100` | `5`     | number of random 100-number runs                |
-| `RUNS_500` | `3`     | number of random 500-number runs                |
-| `TIMEOUT`  | `10`    | seconds before a run counts as a hang           |
-| `LEAKS`    | `1`     | `0` skips the memory-leak sections              |
+| Variable   | Default | Meaning                               |
+| ---------- | ------- | ------------------------------------- |
+| `PS_DIR`   | `..`    | push_swap directory                   |
+| `RUNS_100` | `5`     | number of random 100-number runs      |
+| `RUNS_500` | `3`     | number of random 500-number runs      |
+| `TIMEOUT`  | `10`    | seconds before a run counts as a hang |
+| `LEAKS`    | `1`     | `0` skips the memory-leak sections    |
 
 Example: `make m RUNS_100=20 RUNS_500=10`
 
 ## What is tested
 
 **Mandatory**
+
 - Makefile: `NAME`, `all`, `clean`, `fclean`, `re`, `-Wall -Wextra -Werror`, build, clean/fclean/re behaviour, and relinking (warning only)
 - Norminette (skipped with a warning if it isn't installed; the tester folder is excluded)
 - README.md: present at the repository root (its content is up to you to review)
@@ -54,6 +55,7 @@ Example: `make m RUNS_100=20 RUNS_500=10`
 - Memory leaks: `valgrind` on Linux, `leaks` on macOS
 
 **Bonus (checker)**
+
 - `make bonus`, and relinking (warning only)
 - Errors: bad args, duplicates, overflow, no args (must return without reading stdin), unknown instructions, leading/trailing spaces
 - KO tests: fixed cases, b not empty, random unsorting instructions
