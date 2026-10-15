@@ -464,7 +464,8 @@ m_bench() {
 	else
 		ok "benchmark printed on stderr"
 		grep -q '%' "$TMP/bench" && ok "disorder shown as %" || ko "disorder shown as %"
-		grep -Eiq 'simple' "$TMP/bench" && ok "strategy name" || ko "strategy name (simple)"
+		grep -Eiq 'simple' "$TMP/bench" && ok "strategy name" \
+			|| wn "strategy name: 'simple' not found (fine if the algorithm name is shown instead)"
 		grep -Eiq 'O\(' "$TMP/bench" && ok "complexity class" || ko "complexity class (O(...))"
 		grep -Eq "(^|[^0-9])$V_OPS([^0-9]|$)" "$TMP/bench" && ok "total operations ($V_OPS)" \
 			|| ko "total operations ($V_OPS) shown"

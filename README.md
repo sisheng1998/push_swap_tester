@@ -48,7 +48,7 @@ Example: `make m RUNS_100=20 RUNS_500=10`
 - Identity: sorted inputs print nothing
 - 3 numbers: all 6 permutations through every strategy (≤5 ops, ≤3 good; over the limit only warns)
 - 5 numbers: all 120 permutations through every strategy, with a few example counts shown (≤15 ops, ≤12 good; over the limit only warns)
-- `--bench`: stdout still sorts; stderr shows disorder %, strategy, class, total, and the count per op; disorder is 0.00% / 100.00% / correct for a random list; nothing is printed on stderr without `--bench`
+- `--bench`: stdout still sorts; stderr shows disorder %, strategy, class, total, and the count per op (if the strategy isn't called "simple", you only get a warning, since the subject doesn't fix the name); disorder is 0.00% / 100.00% / correct for a random list; nothing is printed on stderr without `--bench`
 - 100 numbers (<2000 / 1500 / 700) and 500 numbers (<12000 / 8000 / 5500): each random input goes through every strategy, with min/avg/max per strategy
 - 50 numbers through every flag, comparing their operation counts
 - Robustness: every flag against sizes 1→500, reversed input, low/medium disorder, and INT limits
