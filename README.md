@@ -1,6 +1,6 @@
 # push_swap_tester
 
-Tester for the 42 **push_swap** project (version 1.1 with `--simple / --medium / --complex / --adaptive / --bench`). It tests the mandatory part (`push_swap`) and the bonus (`checker`).
+Tester for the 42 **push_swap** project (the version with `--simple / --medium / --complex / --adaptive / --bench`). It tests the mandatory part (`push_swap`) and the bonus (`checker`).
 
 > **Disclaimer:** this tester is an unofficial tool, meant only as a reference to help you check your work. Passing every test doesn't guarantee your project is correct or complete, and a failed or warned test isn't necessarily wrong, since some behaviour depends on how you choose to handle it. Always read the subject yourself and use your own judgment.
 
