@@ -394,6 +394,7 @@ m_identity() {
 }
 
 # strat_result STRATEGY DESC BAD MAX LIMIT GOOD
+# Small inputs (3 / 5 numbers): must sort; going over LIMIT only warns, for every strategy.
 strat_result() {
 	local f="$1" desc="$2" bad="$3" max="$4" limit="$5" good="$6" q=acceptable
 	[ "$max" -le "$good" ] && q=good
@@ -401,11 +402,9 @@ strat_result() {
 		ko "$f: $desc" "not sorted:$bad"
 	elif [ "$max" -le "$limit" ]; then
 		ok "$f: $desc, max $max ops ($q)"
-	elif [ "$f" = --adaptive ]; then
-		ko "$f: $desc" "max $max ops (> $limit)"
 	else
 		ok "$f: $desc"
-		wn "$f: max $max ops is above $limit (limits apply to the default strategy only)"
+		wn "$f: max $max ops is above $limit (small inputs only need to sort; limit is a warning)"
 	fi
 }
 

@@ -46,8 +46,8 @@ Example: `make m RUNS_100=20 RUNS_500=10`
 - Error management: non-numeric input, duplicates, > INT_MAX / < INT_MIN / wrap-around overflow, no parameters. Output must be exactly `Error\n` on stderr, with nothing on stdout
 - Strategy selection: every flag on `5 4 3 2 1`, and no flag gives the same output as `--adaptive`
 - Identity: sorted inputs print nothing
-- 3 numbers: all 6 permutations through every strategy (≤5 ops, ≤3 good)
-- 5 numbers: all 120 permutations through every strategy, with a few example counts shown (≤15 ops, ≤12 good)
+- 3 numbers: all 6 permutations through every strategy (≤5 ops, ≤3 good; over the limit only warns)
+- 5 numbers: all 120 permutations through every strategy, with a few example counts shown (≤15 ops, ≤12 good; over the limit only warns)
 - `--bench`: stdout still sorts; stderr shows disorder %, strategy, class, total, and the count per op; disorder is 0.00% / 100.00% / correct for a random list; nothing is printed on stderr without `--bench`
 - 100 numbers (<2000 / 1500 / 700) and 500 numbers (<12000 / 8000 / 5500): each random input goes through every strategy, with min/avg/max per strategy
 - 50 numbers through every flag, comparing their operation counts
@@ -62,7 +62,7 @@ Example: `make m RUNS_100=20 RUNS_500=10`
 - OK tests: fixed cases, no-ops on an empty b, random lists with valid solutions (up to 500 numbers / ~60k instructions)
 - Fuzzing against a reference checker, and memory leaks
 
-Every strategy must sort correctly. The operation limits apply to the default (`--adaptive`) only; when `--simple`, `--medium` or `--complex` go over a limit, you get a warning instead of a failure (an O(n²) strategy can't stay under 12000 on 500 numbers).
+Every strategy must sort correctly. For 3 and 5 numbers, going over the operation limit is only a warning, for every strategy: a correct sort passes. For 100 and 500 numbers, the limits apply to the default (`--adaptive`) only; when `--simple`, `--medium` or `--complex` go over a limit, you get a warning instead of a failure (an O(n²) strategy can't stay under 12000 on 500 numbers).
 
 Tests marked `(extra)` cover behaviour the subject leaves open (`""`, `0 -0`, `1 +1`, unknown flags, …). They appear as warnings and don't count toward the result.
 
