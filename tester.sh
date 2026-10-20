@@ -61,9 +61,9 @@ run() {
 # Sets PROB and returns 1 when the last run crashed / timed out.
 check_rc() {
 	PROB=
-	if [ "$RC" -eq 124 ]; then PROB="TIMEOUT (> ${TIMEOUT}s)"
-	elif [ "$RC" -eq 127 ]; then PROB="could not execute"
-	elif [ "$RC" -gt 128 ]; then PROB="CRASH: SIG$(kill -l $((RC - 128)) 2>/dev/null)"
+	if [ "$RC" -eq 124 ]; then PROB="TIMEOUT: no answer after ${TIMEOUT}s (infinite loop or waiting on input?)"
+	elif [ "$RC" -eq 127 ]; then PROB="could not execute the program (missing, not executable, or exec failed)"
+	elif [ "$RC" -gt 128 ]; then PROB="CRASH: killed by signal SIG$(kill -l $((RC - 128)) 2>/dev/null) (segfault / abort?)"
 	fi
 	if [ -n "$PROB" ]; then
 		CRASHES=$((CRASHES + 1))
@@ -85,7 +85,9 @@ fmt_cmd() {
 	printf '%s' "${out//$PS_DIR\//./}"
 }
 
-short() { head -c 120 "$1" | tr '\n' '|'; }
+short() {
+	if [ -s "$1" ]; then head -c 120 "$1" | tr '\n' '|'; else printf '(nothing)'; fi
+}
 
 sec_begin() {
 	SEC="$1"; NEED="$2"; SP=0; ST=0; SEC_SKIP=
@@ -147,9 +149,9 @@ expect_error() {
 	if ! check_rc; then
 		ko "$label" "$PROB"
 	elif [ -s "$TMP/o" ]; then
-		ko "$label" "stdout should be empty, got: $(short "$TMP/o")"
+		ko "$label" "expected nothing on stdout (error case), but the program printed: $(short "$TMP/o")"
 	elif ! printf 'Error\n' | cmp -s - "$TMP/e"; then
-		ko "$label" "stderr should be exactly \"Error\\n\", got: \"$(short "$TMP/e")\""
+		ko "$label" "expected exactly \"Error\\n\" on stderr, got: $(short "$TMP/e") (exit code $RC)"
 	else
 		ok "$label"
 	fi
@@ -163,7 +165,7 @@ expect_nothing() {
 	if ! check_rc; then
 		ko "$label" "$PROB"
 	elif [ -s "$TMP/o" ] || [ -s "$TMP/e" ]; then
-		ko "$label" "expected no output, got: $(short "$TMP/o")$(short "$TMP/e")"
+		ko "$label" "expected no output at all, got stdout: $(short "$TMP/o") / stderr: $(short "$TMP/e")"
 	else
 		ok "$label"
 	fi
@@ -192,7 +194,12 @@ verify() {
 		return 1
 	fi
 	V_RES=$("${REF[@]}" $nums <"$TMP/o" 2>&1)
-	[ "$V_RES" = OK ] || V_RES="checker says ${V_RES:-nothing} (invalid/unsorting ops)"
+	case "$V_RES" in
+		OK) ;;
+		KO) V_RES="checker says KO: the operations printed do not leave stack a sorted (and b empty)" ;;
+		Error) V_RES="checker says Error: push_swap printed something that is not a valid operation" ;;
+		*) V_RES="checker gave an unexpected answer: \"${V_RES:-nothing}\"" ;;
+	esac
 	[ "$V_RES" = OK ]
 }
 
@@ -207,6 +214,19 @@ rating() { # ops pass good excellent
 	elif [ "$1" -lt "$3" ]; then printf 'good'
 	elif [ "$1" -lt "$2" ]; then printf 'pass'
 	else printf 'FAIL'; fi
+}
+
+# make_fail BINARY -> explains why the last `mk` did not produce BINARY (full output saved to logs/)
+make_fail() {
+	local bin="$1" f errs why
+	f="$TESTER_DIR/logs/make_failed_$(date +%H%M%S)_$RANDOM.txt"
+	{ echo "== make stdout"; cat "$TMP/mo"; echo "== make stderr"; cat "$TMP/me"; } >"$f"
+	errs=$(cat "$TMP/mo" "$TMP/me" | grep -Ei 'error|\*\*\*|undefined|not found|no rule|cannot' | head -4 | cut -c1-160 | tr '\n' '|')
+	if [ "$RC" -eq 124 ]; then why="make timed out after ${TIMEOUT}s"
+	elif [ "$RC" -ne 0 ]; then why="make failed (exit code $RC)"
+	else why="make succeeded but ./$bin was not created (does NAME match '$bin'?)"; fi
+	[ -z "$errs" ] && errs="$(tail -c 200 "$TMP/me" | tr '\n' '|')"
+	printf '%s. First errors: %s full output: %s' "$why" "${errs:-(no output)}" "${f#$TESTER_DIR/}"
 }
 
 mk() { # make TARGET... in PS_DIR (output in $TMP/mo, $TMP/me)
@@ -258,27 +278,27 @@ m_build() {
 	sec_begin "Makefile & compilation" all
 	local mf="$PS_DIR/Makefile" r
 	if [ ! -f "$mf" ]; then
-		ko "Makefile present"
+		ko "Makefile present" "no Makefile found in $PS_DIR"
 		sec_end; return 1
 	fi
 	ok "Makefile present"
-	if grep -Eq '^[[:space:]]*NAME[[:space:]]*[:+?]?=' "$mf"; then ok "NAME variable"; else ko "NAME variable"; fi
+	if grep -Eq '^[[:space:]]*NAME[[:space:]]*[:+?]?=' "$mf"; then ok "NAME variable"; else ko "NAME variable" "no 'NAME =' line found in Makefile"; fi
 	for r in all clean fclean re; do
 		if grep -Eq "^([^#:=]*[[:space:]])?$r([[:space:]][^:=]*)?:([^=]|$)" "$mf"; then
 			ok "rule '$r'"
 		else
-			ko "rule '$r'"
+			ko "rule '$r'" "no '$r:' target found in Makefile"
 		fi
 	done
 	if grep -q -- -Wall "$mf" && grep -q -- -Wextra "$mf" && grep -q -- -Werror "$mf"; then
 		ok "flags -Wall -Wextra -Werror"
 	else
-		ko "flags -Wall -Wextra -Werror" "not all three found in Makefile"
+		ko "flags -Wall -Wextra -Werror" "missing in Makefile:$(for fl in -Wall -Wextra -Werror; do grep -q -- $fl "$mf" || printf ' %s' $fl; done)"
 	fi
 	mk fclean
 	mk
 	if [ "$RC" -ne 0 ] || [ ! -x "$PS" ]; then
-		ko "make builds ./push_swap" "$(tail -c 300 "$TMP/me" | tr '\n' '|')"
+		ko "make builds ./push_swap" "$(make_fail push_swap)"
 		sec_end; return 1
 	fi
 	ok "make builds ./push_swap"
@@ -290,16 +310,17 @@ m_build() {
 	XTRA=
 	mk clean
 	if [ -n "$(find "$PS_DIR" -path "$TESTER_DIR" -prune -o -name '*.o' -print | head -1)" ]; then
-		ko "make clean removes object files" "$(find "$PS_DIR" -path "$TESTER_DIR" -prune -o -name '*.o' -print | head -1)"
+		ko "make clean removes object files" "object file left after 'make clean': $(find "$PS_DIR" -path "$TESTER_DIR" -prune -o -name '*.o' -print | head -1)"
 	elif [ ! -x "$PS" ]; then
-		ko "make clean keeps ./push_swap"
+		ko "make clean keeps ./push_swap" "./push_swap was deleted by 'make clean' (only 'fclean' may remove it)"
 	else
 		ok "make clean"
 	fi
 	mk fclean
-	if [ -e "$PS" ]; then ko "make fclean removes ./push_swap"; else ok "make fclean"; fi
+	if [ -e "$PS" ]; then ko "make fclean removes ./push_swap" "./push_swap still exists after 'make fclean'"; else ok "make fclean"; fi
 	mk re
-	if [ "$RC" -eq 0 ] && [ -x "$PS" ]; then ok "make re"; else ko "make re"; fi
+	if [ "$RC" -eq 0 ] && [ -x "$PS" ]; then ok "make re"
+	else ko "make re" "exit code $RC, ./push_swap $([ -x "$PS" ] && echo present || echo missing); $(tail -c 200 "$TMP/me" | tr '\n' '|')"; fi
 	[ -x "$PS" ] || mk
 	sec_end
 	[ -x "$PS" ]
@@ -327,7 +348,7 @@ m_norm() {
 m_readme() {
 	sec_begin "README.md" all
 	if [ -f "$PS_DIR/README.md" ]; then ok "README.md at repository root"
-	else ko "README.md at repository root"; fi
+	else ko "README.md at repository root" "no README.md in $PS_DIR (name is case-sensitive)"; fi
 	info "content (first line, sections, algorithms, contributions) must be judged by you"
 	sec_end
 }
@@ -374,7 +395,7 @@ m_flags_basic() {
 		cmp -s "$TMP/def" "$TMP/ada" || { same=0; log "default != --adaptive for: $nums"; }
 	done
 	if [ $same = 1 ]; then ok "no flag produces the same output as --adaptive (4 inputs)"
-	else ko "no flag produces the same output as --adaptive" "outputs differ (inputs in log)"; fi
+	else ko "no flag produces the same output as --adaptive" "default and --adaptive printed different operations; $(grep -m1 'default != --adaptive' "$LOG" | cut -c1-100)"; fi
 	sec_end
 }
 
@@ -439,7 +460,7 @@ m_medium5() {
 		max=0; bad=; over12=0; ex=
 		for p in "${perms[@]}"; do
 			if ! verify "$f" "$p"; then
-				bad="$bad [$p]"; log "5-perm $f $p -> $V_RES"
+				bad="$bad [$p: ${V_RES:0:60}]"; log "5-perm $f $p -> $V_RES"
 				continue
 			fi
 			[ "$V_OPS" -gt $max ] && max=$V_OPS
@@ -460,15 +481,15 @@ m_bench() {
 	else ko "--bench --simple 5 4 3 2 1: stdout sorts" "$V_RES"; fi
 	cp "$TMP/e" "$TMP/bench"
 	if [ ! -s "$TMP/bench" ]; then
-		ko "benchmark printed on stderr" "stderr empty"
+		ko "benchmark printed on stderr" "--bench printed nothing on stderr (stats go to stderr, operations to stdout)"
 	else
 		ok "benchmark printed on stderr"
-		grep -q '%' "$TMP/bench" && ok "disorder shown as %" || ko "disorder shown as %"
+		grep -q '%' "$TMP/bench" && ok "disorder shown as %" || ko "disorder shown as %" "no '%' found in the benchmark; got: $(short "$TMP/bench")"
 		grep -Eiq 'simple' "$TMP/bench" && ok "strategy name" \
 			|| wn "strategy name: 'simple' not found (fine if the algorithm name is shown instead)"
-		grep -Eiq 'O\(' "$TMP/bench" && ok "complexity class" || ko "complexity class (O(...))"
+		grep -Eiq 'O\(' "$TMP/bench" && ok "complexity class" || ko "complexity class (O(...))" "no 'O(' found in the benchmark; got: $(short "$TMP/bench")"
 		grep -Eq "(^|[^0-9])$V_OPS([^0-9]|$)" "$TMP/bench" && ok "total operations ($V_OPS)" \
-			|| ko "total operations ($V_OPS) shown"
+			|| ko "total operations ($V_OPS) shown" "stdout has $V_OPS operations but that number is not in the benchmark; got: $(short "$TMP/bench")"
 		missing=
 		for op in sa sb ss pa pb ra rb rr rra rrb rrr; do
 			grep -Eiq "(^|[^a-z])$op([^a-z]|$)" "$TMP/bench" || missing="$missing $op"
@@ -477,10 +498,10 @@ m_bench() {
 	fi
 	run /dev/null "$TMP/o" "$TMP/e" "$PS" --bench 1 2 3 4 5
 	if grep -Eq '(^|[^0-9.])0[.,]00' "$TMP/e"; then ok "disorder of 1 2 3 4 5 = 0.00%"
-	else ko "disorder of 1 2 3 4 5 = 0.00%" "stderr: $(short "$TMP/e")"; fi
+	else ko "disorder of 1 2 3 4 5 = 0.00%" "expected 0.00% (sorted input), stderr was: $(short "$TMP/e")"; fi
 	run /dev/null "$TMP/o" "$TMP/e" "$PS" --bench 5 4 3 2 1
 	if grep -Eq '100[.,]00' "$TMP/e"; then ok "disorder of 5 4 3 2 1 = 100.00%"
-	else ko "disorder of 5 4 3 2 1 = 100.00%" "stderr: $(short "$TMP/e")"; fi
+	else ko "disorder of 5 4 3 2 1 = 100.00%" "expected 100.00% (reversed input), stderr was: $(short "$TMP/e")"; fi
 	nums=$("$TOOL" gen 40 -500 500)
 	exp=$("$TOOL" disorder $nums)
 	lo=$(awk -v x="$exp" 'BEGIN{printf "%.2f", x-0.01}')
@@ -489,10 +510,10 @@ m_bench() {
 	if grep -Eq "(^|[^0-9])(${exp//./[.,]}|${lo//./[.,]}|${hi//./[.,]})" "$TMP/e"; then
 		ok "disorder of random 40 numbers = $exp%"
 	else
-		ko "disorder of random 40 numbers = $exp%" "stderr: $(short "$TMP/e")"
+		ko "disorder of random 40 numbers = $exp%" "expected $exp% (input: $nums), stderr was: $(short "$TMP/e")"
 	fi
 	run /dev/null "$TMP/o" "$TMP/e" "$PS" 5 4 3 2 1
-	[ -s "$TMP/e" ] && ko "no benchmark output without --bench" "stderr: $(short "$TMP/e")" \
+	[ -s "$TMP/e" ] && ko "no benchmark output without --bench" "nothing should be on stderr without --bench, got: $(short "$TMP/e")" \
 		|| ok "no benchmark output without --bench"
 	XTRA=1
 	for f in "--medium:sqrt|√|n\^?1[.,]5|n\*?√" "--complex:log" "--adaptive:adaptive"; do
@@ -500,11 +521,11 @@ m_bench() {
 		if verify "--bench $f" "$("$TOOL" gen 30)" && grep -Eiq "$re" "$TMP/e"; then
 			ok "--bench $f reports its strategy/class"
 		else
-			ko "--bench $f reports its strategy/class" "expected /$re/ in: $(short "$TMP/e")"
+			ko "--bench $f reports its strategy/class" "${V_RES:-expected /$re/ in the benchmark, got: $(short "$TMP/e")}"
 		fi
 	done
 	verify "--simple --bench" "3 1 2" && [ -s "$TMP/e" ] && ok "flag order --simple --bench works" \
-		|| ko "flag order --simple --bench works" "$V_RES"
+		|| ko "flag order --simple --bench works" "${V_RES:-no benchmark on stderr or output not sorted}"
 	XTRA=
 	sec_end
 }
@@ -583,9 +604,9 @@ m_flags50() {
 
 m_robust() {
 	sec_begin "Robustness - every strategy, every size & disorder" all "subject: any selector must work regardless of input size or disorder"
-	local f fl sz nums bad cnt label
+	local f fl sz nums bad cnt label first
 	for f in --simple --medium --complex --adaptive; do
-		bad=; cnt=0
+		bad=; cnt=0; first=
 		for sz in 1 2 3 4 5 6 7 8 10 25 50 100 500 rev100 rev500 low100 mid100 low500 mid500 limits; do
 			case $sz in
 				rev*) nums=$(seq "${sz#rev}" | sort -rn | tr '\n' ' ') ;;
@@ -597,11 +618,12 @@ m_robust() {
 			cnt=$((cnt + 1))
 			if ! verify "$f" "$nums"; then
 				bad="$bad $sz"
+				[ -z "$first" ] && first="size '$sz': $V_RES - $(save_input "$nums")"
 				log "robust $f $sz: $V_RES" "  input: $nums"
 			fi
 		done
 		if [ -z "$bad" ]; then ok "$f: $cnt cases OK (sizes 1→500, reversed, low/mid disorder, INT limits)"
-		else ko "$f" "failed on:$bad (inputs in log)"; fi
+		else ko "$f" "failed on:$bad. First failure -> $first"; fi
 	done
 	info "disorder of sample inputs: low=$("$TOOL" disorder $("$TOOL" mix 100 5))% mid=$("$TOOL" disorder $("$TOOL" mix 100 35))%"
 	sec_end
@@ -660,7 +682,7 @@ ck_case() { # EXPECT(OK|KO) LABEL INPUT ARGS...
 	if ! check_rc; then
 		ko "$label" "$PROB"
 	elif ! printf '%s\n' "$exp" | cmp -s - "$TMP/o"; then
-		ko "$label" "expected \"$exp\", got stdout \"$(short "$TMP/o")\" stderr \"$(short "$TMP/e")\""
+		ko "$label" "expected \"$exp\" on stdout, got stdout: $(short "$TMP/o") / stderr: $(short "$TMP/e")"
 	else
 		ok "$label → $exp"
 	fi
@@ -678,7 +700,7 @@ b_build() {
 	[ -x "$PS" ] || mk
 	mk bonus
 	if [ "$RC" -ne 0 ] || [ ! -x "$CK" ]; then
-		ko "make bonus builds ./checker" "$(tail -c 300 "$TMP/me" | tr '\n' '|')"
+		ko "make bonus builds ./checker" "$(make_fail checker)"
 		sec_end; return 1
 	fi
 	ok "make bonus builds ./checker"
@@ -705,11 +727,11 @@ b_errors() {
 	}
 	RC=$(cat "$TMP/rc")
 	if [ "$RC" -eq 124 ]; then
-		ko "no arguments: returns immediately" "checker waits for stdin"
+		ko "no arguments: returns immediately" "checker kept waiting on stdin; with no arguments it must exit at once without reading"
 	elif ! check_rc; then
 		ko "no arguments" "$PROB"
 	elif [ -s "$TMP/o" ] || [ -s "$TMP/e" ]; then
-		ko "no arguments: displays nothing" "got: $(short "$TMP/o")$(short "$TMP/e")"
+		ko "no arguments: displays nothing" "expected no output, got stdout: $(short "$TMP/o") / stderr: $(short "$TMP/e")"
 	else
 		ok "no arguments: displays nothing, returns immediately"
 	fi
@@ -750,7 +772,7 @@ b_false() {
 		fi
 	done
 	[ $bad -eq 0 ] && ok "$tot random lists + random unsorting instructions → KO" \
-		|| ko "random unsorting instructions" "$bad/$tot wrong (see log)"
+		|| ko "random unsorting instructions" "$bad/$tot cases: checker should print KO but did not (last: $(grep 'expected KO' "$LOG" | tail -1 | cut -c1-110))"
 	sec_end
 }
 
@@ -773,18 +795,18 @@ b_right() {
 		fi
 	done
 	[ $bad -eq 0 ] && ok "$tot random lists (2→250) + valid sorting instructions → OK" \
-		|| ko "random lists + valid sorting instructions" "$bad/$tot wrong (see log)"
+		|| ko "random lists + valid sorting instructions" "$bad/$tot cases: checker should print OK but did not (last: $(grep 'expected OK' "$LOG" | tail -1 | cut -c1-110))"
 	nums=$("$TOOL" gen 500)
 	"$TOOL" solve $nums >"$TMP/in"
 	run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
 	if check_rc && [ "$(cat "$TMP/o")" = OK ]; then ok "500 numbers, $(wc -l <"$TMP/in" | tr -d ' ') instructions → OK"
-	else ko "500 numbers, large instruction list" "${PROB:-got $(short "$TMP/o")}"; fi
+	else ko "500 numbers, large instruction list" "${PROB:-expected OK, got stdout: $(short "$TMP/o") stderr: $(short "$TMP/e")}"; fi
 	XTRA=1
 	nums=$("$TOOL" gen 100)
 	"$PS" $nums >"$TMP/in" 2>/dev/null
 	run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
 	[ "$(cat "$TMP/o")" = OK ] && ok "./push_swap \$ARG | ./checker \$ARG (100 numbers)" \
-		|| ko "./push_swap \$ARG | ./checker \$ARG (100 numbers)" "got $(short "$TMP/o")"
+		|| ko "./push_swap \$ARG | ./checker \$ARG (100 numbers)" "checker should print OK on push_swap's output, got: $(short "$TMP/o")"
 	XTRA=
 	sec_end
 }
@@ -805,7 +827,7 @@ b_fuzz() {
 			log "fuzz: checker $nums < [$(tr '\n' ' ' <"$TMP/in")] expected $exp got $got"
 		fi
 	done
-	[ $bad -eq 0 ] && ok "60 random cases match the reference" || ko "fuzz" "$bad/60 mismatches (see log)"
+	[ $bad -eq 0 ] && ok "60 random cases match the reference" || ko "fuzz" "$bad/60 answers differ from the reference (last: $(grep 'fuzz' "$LOG" | tail -1 | cut -c1-110))"
 	sec_end
 }
 
