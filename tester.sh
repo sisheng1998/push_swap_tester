@@ -14,6 +14,11 @@ RUNS_100="${RUNS_100:-5}"
 RUNS_500="${RUNS_500:-3}"
 TIMEOUT="${TIMEOUT:-10}"
 LEAKS="${LEAKS:-1}"
+# One seed drives every random input (ps_tool and $RANDOM): rerun with SEED=... to replay.
+SEED="${SEED:-$(( (RANDOM << 15 | RANDOM) % 1000000000 ))}"
+case "$SEED" in '' | *[!0-9]*) echo "SEED must be a non-negative integer (got '$SEED')"; exit 2 ;; esac
+SEED=$((10#$SEED % 1000000000))
+RANDOM=$SEED
 # Op limits apply to the default (--adaptive); the others must sort, limits only warn.
 STRATS=(--adaptive --simple --medium --complex)
 
@@ -24,6 +29,7 @@ cleanup() {
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
+echo 0 >"$TMP/seed_n"
 mkdir -p "$TESTER_DIR/logs"
 LOG="$TESTER_DIR/logs/$(date +%Y%m%d_%H%M%S)_$MODE.log"
 : >"$LOG"
@@ -42,10 +48,22 @@ SUM_NAME=(); SUM_RES=()
 
 log() { printf '%s\n' "$*" >>"$LOG"; }
 
+# tool gen|mix|randops ...   -> ps_tool with SEED + call number, so every call differs
+# but the whole run is reproducible (counter is a file: calls often run in $(...) subshells).
+tool() {
+	local n
+	read -r n <"$TMP/seed_n"
+	echo $((n + 1)) >"$TMP/seed_n"
+	SEED=$((SEED + n)) "$TOOL" "$@"
+}
+
 # run STDIN OUT ERR cmd...   -> RC (124 = timeout, 128+n = killed by signal n)
+# The child gets its own process group so a timeout / Ctrl-C also kills what it spawned (make -> cc).
 PERL_TO='my $t=shift; my $p=fork(); die "fork" unless defined $p;
-if(!$p){ exec {$ARGV[0]} @ARGV; exit 127 }
-$SIG{ALRM}=sub{ kill 9,$p; waitpid($p,0); exit 124 }; alarm $t;
+if(!$p){ setpgrp(0,0); exec {$ARGV[0]} @ARGV; exit 127 }
+setpgrp($p,$p);
+$SIG{INT}=$SIG{TERM}=sub{ kill 9,-$p; waitpid($p,0); exit 130 };
+$SIG{ALRM}=sub{ kill 9,-$p; waitpid($p,0); exit 124 }; alarm $t;
 waitpid($p,0); my $s=$?; exit(($s & 127) ? 128+($s & 127) : ($s >> 8));'
 run() {
 	local in="$1" out="$2" err="$3"
@@ -70,19 +88,6 @@ check_rc() {
 		return 1
 	fi
 	return 0
-}
-
-fmt_cmd() {
-	local a out=""
-	for a in "$@"; do
-		case "$a" in
-			"" | *" "*) out="$out \"$a\"" ;;
-			*) out="$out $a" ;;
-		esac
-	done
-	out="${out# }"
-	[ ${#out} -gt 90 ] && out="${out:0:87}..."
-	printf '%s' "${out//$PS_DIR\//./}"
 }
 
 short() {
@@ -333,14 +338,23 @@ m_norm() {
 		wn "norminette not installed - run it manually"
 		sec_end; return
 	fi
-	local files TIMEOUT=300
-	files=$(find "$PS_DIR" \( -path "$TESTER_DIR" -o -path "$PS_DIR/.git" \) -prune -o \
+	local files=() f TIMEOUT=300
+	while IFS= read -r f; do files+=("$f"); done < <(find "$PS_DIR" \
+		\( -path "$TESTER_DIR" -o -path "$PS_DIR/.git" \) -prune -o \
 		-type f \( -name '*.c' -o -name '*.h' \) -print)
-	run /dev/null "$TMP/o" "$TMP/e" norminette $files
-	if grep -q 'Error' "$TMP/o" "$TMP/e"; then
+	# norminette with no arguments would check the current directory (the tester itself)
+	if [ ${#files[@]} -eq 0 ]; then
+		SEC_SKIP="no .c / .h files found"
+		wn "norminette: no .c / .h files found in $PS_DIR"
+		sec_end; return
+	fi
+	run /dev/null "$TMP/o" "$TMP/e" norminette "${files[@]}"
+	if ! check_rc; then
+		ko "norminette" "$PROB"
+	elif grep -q 'Error' "$TMP/o" "$TMP/e"; then
 		ko "norminette" "$(grep -c 'Error!' "$TMP/o") file(s) with errors: $(grep 'Error!' "$TMP/o" | head -3 | tr '\n' ' ')"
 	else
-		ok "norminette ($(printf '%s\n' "$files" | grep -c .) files)"
+		ok "norminette (${#files[@]} files)"
 	fi
 	sec_end
 }
@@ -384,17 +398,21 @@ m_errors() {
 
 m_flags_basic() {
 	sec_begin "Strategy selection - basic" all
-	local f nums same=1
+	local f nums same=1 prob=
 	for f in --simple --medium --complex --adaptive; do
 		if verify "$f" "5 4 3 2 1"; then ok "push_swap $f 5 4 3 2 1 → OK ($V_OPS ops)"
 		else ko "push_swap $f 5 4 3 2 1" "$V_RES"; fi
 	done
-	for nums in "5 4 3 2 1" "$("$TOOL" gen 20 -100 100)" "$("$TOOL" gen 100)" "$("$TOOL" mix 100 10)"; do
+	for nums in "5 4 3 2 1" "$(tool gen 20 -100 100)" "$(tool gen 100)" "$(tool mix 100 10)"; do
+		# a crash / timeout leaves both outputs empty, which would compare as "same"
 		run /dev/null "$TMP/def" "$TMP/e" "$PS" $nums
+		check_rc || { prob="without flag: $PROB - $(save_input "$nums")"; break; }
 		run /dev/null "$TMP/ada" "$TMP/e" "$PS" --adaptive $nums
+		check_rc || { prob="with --adaptive: $PROB - $(save_input "$nums")"; break; }
 		cmp -s "$TMP/def" "$TMP/ada" || { same=0; log "default != --adaptive for: $nums"; }
 	done
-	if [ $same = 1 ]; then ok "no flag produces the same output as --adaptive (4 inputs)"
+	if [ -n "$prob" ]; then ko "no flag produces the same output as --adaptive" "$prob"
+	elif [ $same = 1 ]; then ok "no flag produces the same output as --adaptive (4 inputs)"
 	else ko "no flag produces the same output as --adaptive" "default and --adaptive printed different operations; $(grep -m1 'default != --adaptive' "$LOG" | cut -c1-100)"; fi
 	sec_end
 }
@@ -502,7 +520,7 @@ m_bench() {
 	run /dev/null "$TMP/o" "$TMP/e" "$PS" --bench 5 4 3 2 1
 	if grep -Eq '100[.,]00' "$TMP/e"; then ok "disorder of 5 4 3 2 1 = 100.00%"
 	else ko "disorder of 5 4 3 2 1 = 100.00%" "expected 100.00% (reversed input), stderr was: $(short "$TMP/e")"; fi
-	nums=$("$TOOL" gen 40 -500 500)
+	nums=$(tool gen 40 -500 500)
 	exp=$("$TOOL" disorder $nums)
 	lo=$(awk -v x="$exp" 'BEGIN{printf "%.2f", x-0.01}')
 	hi=$(awk -v x="$exp" 'BEGIN{printf "%.2f", x+0.01}')
@@ -518,7 +536,7 @@ m_bench() {
 	XTRA=1
 	for f in "--medium:sqrt|√|n\^?1[.,]5|n\*?√" "--complex:log" "--adaptive:adaptive"; do
 		re="${f#*:}"; f="${f%%:*}"
-		if verify "--bench $f" "$("$TOOL" gen 30)" && grep -Eiq "$re" "$TMP/e"; then
+		if verify "--bench $f" "$(tool gen 30)" && grep -Eiq "$re" "$TMP/e"; then
 			ok "--bench $f reports its strategy/class"
 		else
 			ko "--bench $f reports its strategy/class" "${V_RES:-expected /$re/ in the benchmark, got: $(short "$TMP/e")}"
@@ -536,8 +554,8 @@ perf() {
 	local mins=() maxs=() sums=() ns=()
 	for k in "${!STRATS[@]}"; do mins[k]=999999; maxs[k]=0; sums[k]=0; ns[k]=0; done
 	for i in $(seq 1 "$runs"); do
-		if [ "$i" -eq "$runs" ] && [ "$runs" -gt 1 ]; then nums=$("$TOOL" gen "$size")
-		else nums=$("$TOOL" gen "$size" 1 "$hi"); fi
+		if [ "$i" -eq "$runs" ] && [ "$runs" -gt 1 ]; then nums=$(tool gen "$size")
+		else nums=$(tool gen "$size" 1 "$hi"); fi
 		line=; fail=
 		for k in "${!STRATS[@]}"; do
 			f=${STRATS[k]}
@@ -551,7 +569,8 @@ perf() {
 			line="$line ${f#--}=$V_OPS"
 			[ "$k" -eq 0 ] && [ "$V_OPS" -ge "$pass" ] && fail="$fail adaptive uses $V_OPS ops (≥ $pass);"
 		done
-		if [ -n "$fail" ]; then ko "run $i:$line" "${fail% ;} - $(save_input "$nums")"
+		fail="${fail# }"
+		if [ -n "$fail" ]; then ko "run $i:$line" "${fail%;} - $(save_input "$nums")"
 		else ok "run $i:$line"; fi
 	done
 	for k in "${!STRATS[@]}"; do
@@ -578,15 +597,15 @@ m_500() {
 
 m_flags50() {
 	sec_begin "Strategy flags testing (50 numbers)" all
-	local r nums f line s c
+	local r nums f line s c mark
 	for r in 1 2 3; do
-		nums=$("$TOOL" gen 50 1 200)
-		line=; s=; c=
+		nums=$(tool gen 50 1 200)
+		line=; s=; c=; mark="$G✔$N"
 		for f in --simple --medium --complex --adaptive none; do
 			if [ $f = none ]; then verify "" "$nums"; else verify "$f" "$nums"; fi
 			if [ "$V_RES" != OK ]; then
 				ko "input $r: ${f#--}" "$V_RES - $(save_input "$nums")"
-				line="$line ${f#--}=✘"
+				line="$line ${f#--}=✘"; mark="$R✘$N"
 				continue
 			fi
 			SP=$((SP + 1)); ST=$((ST + 1))
@@ -594,7 +613,7 @@ m_flags50() {
 			[ $f = --simple ] && s=$V_OPS
 			[ $f = --complex ] && c=$V_OPS
 		done
-		printf '  %s✔%s input %s:%s\n' "$G" "$N" "$r" "$line"
+		printf '  %s input %s:%s\n' "$mark" "$r" "$line"
 		if [ -n "$s" ] && [ -n "$c" ] && [ "$c" -ge "$s" ]; then
 			wn "input $r: --complex ($c) is not better than --simple ($s)"
 		fi
@@ -610,10 +629,10 @@ m_robust() {
 		for sz in 1 2 3 4 5 6 7 8 10 25 50 100 500 rev100 rev500 low100 mid100 low500 mid500 limits; do
 			case $sz in
 				rev*) nums=$(seq "${sz#rev}" | sort -rn | tr '\n' ' ') ;;
-				low*) nums=$("$TOOL" mix "${sz#low}" 5) ;;
-				mid*) nums=$("$TOOL" mix "${sz#mid}" 35) ;;
+				low*) nums=$(tool mix "${sz#low}" 5) ;;
+				mid*) nums=$(tool mix "${sz#mid}" 35) ;;
 				limits) nums="2147483647 -2147483648 0 -1 1 2147483646 -2147483647" ;;
-				*) nums=$("$TOOL" gen "$sz") ;;
+				*) nums=$(tool gen "$sz") ;;
 			esac
 			cnt=$((cnt + 1))
 			if ! verify "$f" "$nums"; then
@@ -625,7 +644,7 @@ m_robust() {
 		if [ -z "$bad" ]; then ok "$f: $cnt cases OK (sizes 1→500, reversed, low/mid disorder, INT limits)"
 		else ko "$f" "failed on:$bad. First failure -> $first"; fi
 	done
-	info "disorder of sample inputs: low=$("$TOOL" disorder $("$TOOL" mix 100 5))% mid=$("$TOOL" disorder $("$TOOL" mix 100 35))%"
+	info "disorder of sample inputs: low=$("$TOOL" disorder $(tool mix 100 5))% mid=$("$TOOL" disorder $(tool mix 100 35))%"
 	sec_end
 }
 
@@ -643,10 +662,10 @@ m_leaks() {
 	leak_case "error: overflow" /dev/null "$PS" 1 2147483648
 	leak_case "sorted input" /dev/null "$PS" 1 2 3
 	leak_case "5 numbers" /dev/null "$PS" 5 1 4 2 3
-	leak_case "--simple 50 numbers" /dev/null "$PS" --simple $("$TOOL" gen 50)
-	leak_case "--medium 100 numbers" /dev/null "$PS" --medium $("$TOOL" gen 100)
-	leak_case "--complex 100 numbers" /dev/null "$PS" --complex $("$TOOL" gen 100)
-	leak_case "--bench --adaptive 500 numbers" /dev/null "$PS" --bench --adaptive $("$TOOL" gen 500)
+	leak_case "--simple 50 numbers" /dev/null "$PS" --simple $(tool gen 50)
+	leak_case "--medium 100 numbers" /dev/null "$PS" --medium $(tool gen 100)
+	leak_case "--complex 100 numbers" /dev/null "$PS" --complex $(tool gen 100)
+	leak_case "--bench --adaptive 500 numbers" /dev/null "$PS" --bench --adaptive $(tool gen 500)
 	sec_end
 }
 
@@ -762,8 +781,8 @@ b_false() {
 	local i n nums ops bad=0 tot=0
 	for i in $(seq 1 25); do
 		n=$((RANDOM % 15 + 2))
-		nums=$("$TOOL" gen $n -1000 1000)
-		"$TOOL" randops $((RANDOM % 25 + 1)) >"$TMP/in"
+		nums=$(tool gen $n -1000 1000)
+		tool randops $((RANDOM % 25 + 1)) >"$TMP/in"
 		[ "$("$TOOL" check $nums <"$TMP/in")" = KO ] || continue
 		tot=$((tot + 1))
 		run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
@@ -786,7 +805,7 @@ b_right() {
 	ck_case OK "INT limits 2147483647 -2147483648 + [sa]" $'sa\n' 2147483647 -2147483648
 	local n nums bad=0 tot=0
 	for n in 2 3 4 5 7 10 20 50 100 100 250; do
-		nums=$("$TOOL" gen $n)
+		nums=$(tool gen $n)
 		"$TOOL" solve $nums >"$TMP/in"
 		tot=$((tot + 1))
 		run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
@@ -796,17 +815,26 @@ b_right() {
 	done
 	[ $bad -eq 0 ] && ok "$tot random lists (2→250) + valid sorting instructions → OK" \
 		|| ko "random lists + valid sorting instructions" "$bad/$tot cases: checker should print OK but did not (last: $(grep 'expected OK' "$LOG" | tail -1 | cut -c1-110))"
-	nums=$("$TOOL" gen 500)
+	nums=$(tool gen 500)
 	"$TOOL" solve $nums >"$TMP/in"
 	run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
 	if check_rc && [ "$(cat "$TMP/o")" = OK ]; then ok "500 numbers, $(wc -l <"$TMP/in" | tr -d ' ') instructions → OK"
 	else ko "500 numbers, large instruction list" "${PROB:-expected OK, got stdout: $(short "$TMP/o") stderr: $(short "$TMP/e")}"; fi
 	XTRA=1
-	nums=$("$TOOL" gen 100)
-	"$PS" $nums >"$TMP/in" 2>/dev/null
-	run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
-	[ "$(cat "$TMP/o")" = OK ] && ok "./push_swap \$ARG | ./checker \$ARG (100 numbers)" \
-		|| ko "./push_swap \$ARG | ./checker \$ARG (100 numbers)" "checker should print OK on push_swap's output, got: $(short "$TMP/o")"
+	nums=$(tool gen 100)
+	run /dev/null "$TMP/in" "$TMP/e" "$PS" $nums
+	if ! check_rc; then
+		ko "./push_swap \$ARG | ./checker \$ARG (100 numbers)" "push_swap: $PROB"
+	else
+		run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
+		if ! check_rc; then
+			ko "./push_swap \$ARG | ./checker \$ARG (100 numbers)" "checker: $PROB"
+		elif [ "$(cat "$TMP/o")" = OK ]; then
+			ok "./push_swap \$ARG | ./checker \$ARG (100 numbers)"
+		else
+			ko "./push_swap \$ARG | ./checker \$ARG (100 numbers)" "checker should print OK on push_swap's output, got: $(short "$TMP/o")"
+		fi
+	fi
 	XTRA=
 	sec_end
 }
@@ -815,9 +843,9 @@ b_fuzz() {
 	sec_begin "Checker - fuzz against reference" all "random lists + random/valid instruction mixes, all 11 ops"
 	local i nums exp got bad=0
 	for i in $(seq 1 60); do
-		nums=$("$TOOL" gen $((RANDOM % 6 + 1)) -20 20)
+		nums=$(tool gen $((RANDOM % 6 + 1)) -20 20)
 		if [ $((i % 3)) -eq 0 ]; then "$TOOL" solve $nums >"$TMP/in"
-		else "$TOOL" randops $((RANDOM % 12)) >"$TMP/in"; fi
+		else tool randops $((RANDOM % 12)) >"$TMP/in"; fi
 		exp=$("$TOOL" check $nums <"$TMP/in")
 		run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
 		check_rc || { bad=$((bad + 1)); log "fuzz crash: $nums"; continue; }
@@ -846,7 +874,7 @@ b_leaks() {
 	leak_case "error: bad instruction" "$TMP/lin" "$CK" 3 2 1
 	printf 'sa\npb\nrrr\n' >"$TMP/lin"
 	leak_case "KO case" "$TMP/lin" "$CK" 0 9 1 8 2 7 3 6 4 5
-	nums=$("$TOOL" gen 100)
+	nums=$(tool gen 100)
 	"$TOOL" solve $nums >"$TMP/lin"
 	leak_case "OK case (100 numbers)" "$TMP/lin" "$CK" $nums
 	sec_end
@@ -871,7 +899,8 @@ pick_ref
 
 printf '%spush_swap tester%s  -  %s\n' "$B" "$N" "$PS_DIR"
 printf '%sDisclaimer: unofficial tester, for reference only. Passing does not guarantee a correct project.%s\n' "$Y" "$N"
-printf '%sverifying with %s | timeout %ss | log: %s%s\n' "$D" "$REF_NAME" "$TIMEOUT" "${LOG#$TESTER_DIR/}" "$D$N"
+printf '%sverifying with %s | timeout %ss | seed %s | log: %s%s\n' "$D" "$REF_NAME" "$TIMEOUT" "$SEED" "${LOG#$TESTER_DIR/}" "$D$N"
+log "SEED=$SEED (replay with: make $MODE SEED=$SEED)"
 
 case "$MODE" in
 	mandatory) run_mandatory ;;
@@ -895,5 +924,6 @@ else
 	printf '  %s%s failed test(s)%s' "$R$B" "$FAILS" "$N"
 fi
 printf ', %s warning(s). Details: %s\n' "$WARNS" "${LOG#$TESTER_DIR/}"
+printf '  %sReplay the same random inputs with SEED=%s%s\n' "$D" "$SEED" "$N"
 printf '  %sRunning make clean in the push_swap repo to remove object files.%s\n' "$D" "$N"
 [ "$FAILS" -eq 0 ] && [ "$CRASHES" -eq 0 ]

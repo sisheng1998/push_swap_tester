@@ -3,6 +3,7 @@
 #   make m   -> mandatory only
 #   make b   -> bonus only
 # Options: PS_DIR=..  RUNS_100=5  RUNS_500=3  TIMEOUT=10  LEAKS=0 (skip leak checks)
+#          SEED=N (replay the random inputs of an earlier run)
 
 PS_DIR		?= ..
 RUNS_100	?= 5
@@ -12,7 +13,8 @@ LEAKS		?= 1
 
 TOOL		= tools/ps_tool
 ENV			= PS_DIR="$(PS_DIR)" RUNS_100=$(RUNS_100) RUNS_500=$(RUNS_500) \
-			  TIMEOUT=$(TIMEOUT) LEAKS=$(LEAKS)
+			  TIMEOUT=$(TIMEOUT) LEAKS=$(LEAKS) \
+			  $(if $(SEED),SEED=$(SEED))
 
 help:
 	@echo "usage: make a | m | b    (all, mandatory, bonus)"

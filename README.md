@@ -33,8 +33,11 @@ Append to any target:
 | `RUNS_500` | `3`     | number of random 500-number runs      |
 | `TIMEOUT`  | `10`    | seconds before a run counts as a hang |
 | `LEAKS`    | `1`     | `0` skips the memory-leak sections    |
+| `SEED`     | random  | replays the random inputs of a run    |
 
 Example: `make m RUNS_100=20 RUNS_500=10`
+
+Each run prints its seed in the header and the summary; `make m SEED=<seed>` reruns it with exactly the same random inputs.
 
 ## What is tested
 
