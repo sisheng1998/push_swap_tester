@@ -76,4 +76,4 @@ Any crash or timeout is counted and reported separately in the summary. When a r
 - Results are checked with `checker_linux` when it runs on the machine (Linux x86_64). Otherwise the built-in reference checker `tools/ps_tool` is used, so the tester also works on macOS.
 - The tester runs `make fclean` / `make re` / `make bonus` inside the push_swap folder.
 - Still to check by hand: the README content, the group requirements and explanations of the code.
-- **Delete `push_swap_tester/` when you're done.** Its `.c` file would otherwise fail a norminette run at the repository root.
+- **Delete `push_swap_tester/` when you're done.** It isn't part of your submission. Its `tools/*.c` files pass norminette, so a run at the repository root won't fail because of it.

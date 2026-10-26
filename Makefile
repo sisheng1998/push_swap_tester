@@ -12,6 +12,7 @@ TIMEOUT		?= 10
 LEAKS		?= 1
 
 TOOL		= tools/ps_tool
+TOOL_SRC	= $(wildcard tools/*.c)
 ENV			= PS_DIR="$(PS_DIR)" RUNS_100=$(RUNS_100) RUNS_500=$(RUNS_500) \
 			  TIMEOUT=$(TIMEOUT) LEAKS=$(LEAKS) \
 			  $(if $(SEED),SEED=$(SEED))
@@ -29,8 +30,8 @@ m: $(TOOL)
 b: $(TOOL)
 	@$(ENV) bash ./tester.sh bonus || true
 
-$(TOOL): tools/ps_tool.c
-	@cc -O2 -o $@ $<
+$(TOOL): $(TOOL_SRC) tools/ps_tool.h
+	@cc -O2 -o $@ $(TOOL_SRC)
 
 clean:
 	@rm -rf $(TOOL) logs

@@ -893,7 +893,7 @@ run_bonus() {
 # ---------------------------------------------------------------- main
 
 if [ ! -x "$TOOL" ]; then
-	cc -O2 -o "$TOOL" "$TESTER_DIR/tools/ps_tool.c" || { echo "cannot build ps_tool"; exit 2; }
+	cc -O2 -o "$TOOL" "$TESTER_DIR"/tools/*.c || { echo "cannot build ps_tool"; exit 2; }
 fi
 pick_ref
 
