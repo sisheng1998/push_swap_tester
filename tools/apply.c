@@ -12,21 +12,21 @@
 
 #include "ps_tool.h"
 
-static const char	*g_ops[] = {"sa", "sb", "ss", "pa", "pb", "ra", "rb",
-	"rr", "rra", "rrb", "rrr"};
-
 const char	*op_name(int i)
 {
-	return (g_ops[i]);
+	const char	*ops[] = {"sa", "sb", "ss", "pa", "pb", "ra", "rb",
+		"rr", "rra", "rrb", "rrr"};
+
+	return (ops[i]);
 }
 
-/* Index into g_ops: ss / rr / rrr hit both the a and the b case. */
+/* ss / rr / rrr hit both the a and the b case. */
 int	apply(const char *op, t_stack *a, t_stack *b)
 {
 	int	i;
 
 	i = 0;
-	while (i < 11 && strcmp(op, g_ops[i]))
+	while (i < 11 && strcmp(op, op_name(i)))
 		i++;
 	if (i == 11)
 		return (0);

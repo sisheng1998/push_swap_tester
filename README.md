@@ -37,7 +37,7 @@ Append to any target:
 
 Example: `make m RUNS_100=20 RUNS_500=10`
 
-Each run prints its seed in the header and the summary; `make m SEED=<seed>` reruns it with exactly the same random inputs.
+Each run prints its seed in the header and the summary; `make m SEED=<seed>` reruns it with exactly the same random inputs. Each section has its own inputs for a given seed, so `make b SEED=<seed>` replays the bonus part of a `make a` run too, and `LEAKS=0` doesn't change them. Replays work on the same kind of machine: macOS and Linux generate different numbers from the same seed.
 
 ## What is tested
 
@@ -69,7 +69,7 @@ Every strategy must sort correctly. For 3 and 5 numbers, going over the operatio
 
 Tests marked `(extra)` cover behaviour the subject leaves open (`""`, `0 -0`, `1 +1`, unknown flags, …). They appear as warnings and don't count toward the result.
 
-Any crash or timeout is counted and reported separately in the summary. When a run fails, its input is saved to `logs/failed_input_*.txt`, and every run writes a full log to `logs/`.
+Any crash or timeout is counted and reported separately in the summary. The exit code of `push_swap` / `checker` is never checked, so `exit(-1)` after `Error` is fine. A program that prints more than 100 MB is stopped (endless output loop), and once a strategy times out, its remaining inputs in that section are skipped instead of each waiting for the timeout. When a run fails, its input is saved to `logs/failed_input_*.txt`, and every run writes a full log to `logs/`.
 
 ## Notes
 

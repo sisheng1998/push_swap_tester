@@ -49,7 +49,8 @@ SUM_NAME=(); SUM_RES=()
 log() { printf '%s\n' "$*" >>"$LOG"; }
 
 # tool gen|mix|randops ...   -> ps_tool with SEED + call number, so every call differs
-# but the whole run is reproducible (counter is a file: calls often run in $(...) subshells).
+# but the whole run is reproducible (counter is a file: calls often run in $(...) subshells;
+# sec_begin moves it to the section's own offset).
 tool() {
 	local n
 	read -r n <"$TMP/seed_n"
@@ -57,32 +58,58 @@ tool() {
 	SEED=$((SEED + n)) "$TOOL" "$@"
 }
 
-# run STDIN OUT ERR cmd...   -> RC (124 = timeout, 128+n = killed by signal n)
+# A program stuck in an output loop can write ~1 GB in 10 s: cap every file written (SIGXFSZ).
+OUT_MB=100
+ulimit -f $((OUT_MB * 1024)) 2>/dev/null
+SIGXFSZ=$(kill -l XFSZ 2>/dev/null)
+
+# run STDIN OUT ERR cmd...   -> RC (the program's own exit code) and RK, how it ended:
+# exit | timeout | noexec | "signal N". RK comes from a status file, so a program that
+# exits with 124 / 127 / 255 (exit(-1)) is never mistaken for a timeout or a crash.
 # The child gets its own process group so a timeout / Ctrl-C also kills what it spawned (make -> cc).
-PERL_TO='my $t=shift; my $p=fork(); die "fork" unless defined $p;
-if(!$p){ setpgrp(0,0); exec {$ARGV[0]} @ARGV; exit 127 }
+PERL_TO='my $t=shift; my $f=shift;
+sub st { open(my $h, ">", $f) or return; print $h $_[0]; close $h }
+my $p=fork(); die "fork" unless defined $p;
+if(!$p){ setpgrp(0,0); exec {$ARGV[0]} @ARGV; st("noexec"); exit 127 }
 setpgrp($p,$p);
-$SIG{INT}=$SIG{TERM}=sub{ kill 9,-$p; waitpid($p,0); exit 130 };
-$SIG{ALRM}=sub{ kill 9,-$p; waitpid($p,0); exit 124 }; alarm $t;
-waitpid($p,0); my $s=$?; exit(($s & 127) ? 128+($s & 127) : ($s >> 8));'
+$SIG{INT}=$SIG{TERM}=sub{ kill 9,-$p; waitpid($p,0); st("interrupted"); exit 130 };
+$SIG{ALRM}=sub{ kill 9,-$p; waitpid($p,0); st("timeout"); exit 124 }; alarm $t;
+waitpid($p,0); my $s=$?;
+if($s & 127){ st("signal ".($s & 127)); exit(128+($s & 127)) }
+exit($s >> 8);'
 run() {
 	local in="$1" out="$2" err="$3"
 	shift 3
+	: >"$TMP/st"
 	if [ "$in" = - ]; then
-		perl -e "$PERL_TO" "$TIMEOUT" "$@" >"$out" 2>"$err"
+		perl -e "$PERL_TO" "$TIMEOUT" "$TMP/st" "$@" >"$out" 2>"$err"
 	else
-		perl -e "$PERL_TO" "$TIMEOUT" "$@" <"$in" >"$out" 2>"$err"
+		perl -e "$PERL_TO" "$TIMEOUT" "$TMP/st" "$@" <"$in" >"$out" 2>"$err"
 	fi
 	RC=$?
+	RK=
+	read -r RK <"$TMP/st"
+	[ -n "$RK" ] || RK=exit
 }
+
+# True when the last run timed out or hit the output cap: both cost a full timeout / disk,
+# so loops stop retrying that program instead of waiting on every remaining input.
+hung() { [ "$RK" = timeout ] || [ "$RK" = "signal $SIGXFSZ" ]; }
 
 # Sets PROB and returns 1 when the last run crashed / timed out.
 check_rc() {
+	local sig
 	PROB=
-	if [ "$RC" -eq 124 ]; then PROB="TIMEOUT: no answer after ${TIMEOUT}s (infinite loop or waiting on input?)"
-	elif [ "$RC" -eq 127 ]; then PROB="could not execute the program (missing, not executable, or exec failed)"
-	elif [ "$RC" -gt 128 ]; then PROB="CRASH: killed by signal SIG$(kill -l $((RC - 128)) 2>/dev/null) (segfault / abort?)"
-	fi
+	case "$RK" in
+		timeout) PROB="TIMEOUT: no answer after ${TIMEOUT}s (infinite loop or waiting on input?)" ;;
+		noexec) PROB="could not execute the program (missing, not executable, or exec failed)" ;;
+		interrupted) PROB="interrupted" ;;
+		signal\ *)
+			sig=$(kill -l "${RK#signal }" 2>/dev/null)
+			if [ "$sig" = XFSZ ]; then PROB="OUTPUT TOO LARGE: stopped after ${OUT_MB} MB of output (endless output loop?)"
+			else PROB="CRASH: killed by signal SIG${sig:-${RK#signal }} (segfault / abort?)"; fi
+			;;
+	esac
 	if [ -n "$PROB" ]; then
 		CRASHES=$((CRASHES + 1))
 		return 1
@@ -94,8 +121,15 @@ short() {
 	if [ -s "$1" ]; then head -c 120 "$1" | tr '\n' '|'; else printf '(nothing)'; fi
 }
 
+# Each section draws its random inputs from its own offset of SEED (from its name), so a
+# section gets the same inputs whatever ran before it (make a / m / b, LEAKS=0, ...).
 sec_begin() {
-	SEC="$1"; NEED="$2"; SP=0; ST=0; SEC_SKIP=
+	local base
+	SEC="$1"; NEED="$2"; SP=0; ST=0; SEC_SKIP=; HUNG=
+	base=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
+	base=$(( base % 100000 * 1000 ))
+	echo "$base" >"$TMP/seed_n"
+	RANDOM=$((SEED + base))
 	printf '\n%s▸ %s%s\n' "$B" "$1" "$N"
 	[ -n "$3" ] && printf '  %s%s%s\n' "$D" "$3" "$N"
 	log "" "=== $1"
@@ -191,8 +225,16 @@ pick_ref() {
 verify() {
 	local flags="$1" nums="$2"
 	V_OPS=0
+	case "$HUNG" in *"|$flags|"*)
+		V_RES="skipped: push_swap $flags already timed out in this section"
+		return 1 ;;
+	esac
 	run /dev/null "$TMP/o" "$TMP/e" "$PS" $flags $nums
-	if ! check_rc; then V_RES="$PROB"; return 1; fi
+	if ! check_rc; then
+		V_RES="$PROB"
+		hung && HUNG="$HUNG|$flags|"
+		return 1
+	fi
 	V_OPS=$(wc -l <"$TMP/o" | tr -d ' ')
 	if [ -s "$TMP/e" ] && [[ "$flags" != *--bench* ]]; then
 		V_RES="unexpected stderr: $(short "$TMP/e")"
@@ -227,7 +269,7 @@ make_fail() {
 	f="$TESTER_DIR/logs/make_failed_$(date +%H%M%S)_$RANDOM.txt"
 	{ echo "== make stdout"; cat "$TMP/mo"; echo "== make stderr"; cat "$TMP/me"; } >"$f"
 	errs=$(cat "$TMP/mo" "$TMP/me" | grep -Ei 'error|\*\*\*|undefined|not found|no rule|cannot' | head -4 | cut -c1-160 | tr '\n' '|')
-	if [ "$RC" -eq 124 ]; then why="make timed out after ${TIMEOUT}s"
+	if [ "$RK" = timeout ]; then why="make timed out after ${TIMEOUT}s"
 	elif [ "$RC" -ne 0 ]; then why="make failed (exit code $RC)"
 	else why="make succeeded but ./$bin was not created (does NAME match '$bin'?)"; fi
 	[ -z "$errs" ] && errs="$(tail -c 200 "$TMP/me" | tr '\n' '|')"
@@ -266,11 +308,19 @@ leak_case() {
 			ok "$label"
 		fi
 	else
+		# leaks -atExit exits 0 even when the program crashes: run it alone first.
+		run "$in" "$TMP/o" "$TMP/e" "$@"
+		if ! check_rc; then
+			ko "$label" "$PROB"
+			return
+		fi
 		MallocStackLogging=0 run "$in" "$TMP/o" "$TMP/e" leaks -quiet -atExit -- "$@"
 		if grep -Eq '[1-9][0-9]* leaks? for' "$TMP/o"; then
 			ko "$label" "$(grep -E 'leaks? for' "$TMP/o" | head -1)"
 		elif ! check_rc; then
 			ko "$label" "$PROB"
+		elif ! grep -Eq 'leaks? for' "$TMP/o"; then
+			wn "$label: leaks could not analyse the program - check manually" "$(short "$TMP/e")"
 		else
 			ok "$label"
 		fi
@@ -351,8 +401,10 @@ m_norm() {
 	run /dev/null "$TMP/o" "$TMP/e" norminette "${files[@]}"
 	if ! check_rc; then
 		ko "norminette" "$PROB"
-	elif grep -q 'Error' "$TMP/o" "$TMP/e"; then
-		ko "norminette" "$(grep -c 'Error!' "$TMP/o") file(s) with errors: $(grep 'Error!' "$TMP/o" | head -3 | tr '\n' ' ')"
+	elif grep -Eq ': Error!|^Error: ' "$TMP/o" "$TMP/e"; then
+		ko "norminette" "$(grep -c ': Error!' "$TMP/o") file(s) with errors: $(grep ': Error!' "$TMP/o" | head -3 | tr '\n' ' ')"
+	elif [ "$RC" -ne 0 ]; then
+		ko "norminette" "norminette exited with code $RC: $(short "$TMP/e")"
 	else
 		ok "norminette (${#files[@]} files)"
 	fi
@@ -742,10 +794,10 @@ b_errors() {
 	ck_error "< MININT: checker -2147483649 1" "" -2147483649 1
 	{ printf ''; sleep 2; } | {
 		TIMEOUT=1 run - "$TMP/o" "$TMP/e" "$CK"
-		echo "$RC" >"$TMP/rc"
+		echo "$RC $RK" >"$TMP/rc"
 	}
-	RC=$(cat "$TMP/rc")
-	if [ "$RC" -eq 124 ]; then
+	read -r RC RK <"$TMP/rc"
+	if [ "$RK" = timeout ]; then
 		ko "no arguments: returns immediately" "checker kept waiting on stdin; with no arguments it must exit at once without reading"
 	elif ! check_rc; then
 		ko "no arguments" "$PROB"
@@ -788,6 +840,7 @@ b_false() {
 		run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
 		if ! check_rc || [ "$(cat "$TMP/o")" != KO ]; then
 			bad=$((bad + 1)); log "expected KO: checker $nums < $(tr '\n' ' ' <"$TMP/in")"
+			hung && { log "expected KO: checker timed out - remaining random cases skipped"; break; }
 		fi
 	done
 	[ $bad -eq 0 ] && ok "$tot random lists + random unsorting instructions → KO" \
@@ -811,6 +864,7 @@ b_right() {
 		run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
 		if ! check_rc || [ "$(cat "$TMP/o")" != OK ]; then
 			bad=$((bad + 1)); log "expected OK: checker $nums (ops from ps_tool solve)"
+			hung && { log "expected OK: checker timed out - remaining random cases skipped"; break; }
 		fi
 	done
 	[ $bad -eq 0 ] && ok "$tot random lists (2→250) + valid sorting instructions → OK" \
@@ -841,14 +895,20 @@ b_right() {
 
 b_fuzz() {
 	sec_begin "Checker - fuzz against reference" all "random lists + random/valid instruction mixes, all 11 ops"
-	local i nums exp got bad=0
+	local i n nums exp got bad=0
 	for i in $(seq 1 60); do
-		nums=$(tool gen $((RANDOM % 6 + 1)) -20 20)
+		# $RANDOM inside $(...) is reseeded by bash 3.2 subshells: draw it out here
+		n=$((RANDOM % 6 + 1))
+		nums=$(tool gen $n -20 20)
 		if [ $((i % 3)) -eq 0 ]; then "$TOOL" solve $nums >"$TMP/in"
 		else tool randops $((RANDOM % 12)) >"$TMP/in"; fi
 		exp=$("$TOOL" check $nums <"$TMP/in")
 		run "$TMP/in" "$TMP/o" "$TMP/e" "$CK" $nums
-		check_rc || { bad=$((bad + 1)); log "fuzz crash: $nums"; continue; }
+		if ! check_rc; then
+			bad=$((bad + 1)); log "fuzz crash: $nums ($PROB)"
+			hung && { log "fuzz: checker timed out - remaining cases skipped"; break; }
+			continue
+		fi
 		got=$(cat "$TMP/o")
 		if [ "$got" != "$exp" ]; then
 			bad=$((bad + 1))
@@ -893,7 +953,7 @@ run_bonus() {
 # ---------------------------------------------------------------- main
 
 if [ ! -x "$TOOL" ]; then
-	cc -O2 -o "$TOOL" "$TESTER_DIR"/tools/*.c || { echo "cannot build ps_tool"; exit 2; }
+	(set +f; cc -O2 -o "$TOOL" "$TESTER_DIR"/tools/*.c) || { echo "cannot build ps_tool"; exit 2; }
 fi
 pick_ref
 
